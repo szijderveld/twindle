@@ -73,7 +73,7 @@ A user opens the frontend. The map shows the operating region with trucks moving
 
 The user asks "which events last month had the worst on-time arrival rate?" The agent queries historical data, returns a ranked list, and highlights those events on the map.
 
-The user asks "what if we added two more trucks during summer weekends?" The agent constructs a `Scenario` object and runs the simulation. Once the run completes (in under 30 seconds), the map plays back the what-if state alongside the baseline. The agent summarises the difference, the user sees side-by-side metrics, and they can drill in.
+The user asks "what if we added two more trucks to the fleet?" The agent constructs a `Scenario` object and runs the simulation. Once the run completes (in under 30 seconds), the map plays back the what-if state alongside the baseline. The agent summarises the difference, the user sees side-by-side metrics, and they can drill in.
 
 The user asks "why did event 47 finish late in the baseline?" The agent inspects the simulation trace for that event and explains the bottleneck in plain language.
 
@@ -83,7 +83,7 @@ Everything in v1 serves this demonstration. Everything not needed for it is cut.
 
 **Framework core, as a Python package.** A domain definition pattern where entities are SQLModel classes inheriting from the framework base types, annotated for their role in queries, simulation, and visualisation. A query layer that exposes typed query tools to the agent, executing against SQLAlchemy, with a small fallback `run_sql` tool for ad-hoc questions the typed tools cannot answer. A simulation runtime that takes the domain definition, a scenario object, and a database snapshot, then runs SimPy processes over the entities, writing results to a `simulation_events` table and a `simulation_state` table, tagged by `scenario_id`. A scenario system with a base `Scenario` Pydantic model and the fixed primitives listed above. An agent module built on Pydantic AI with the generated tool surface, the AG-UI adapter, and a domain-aware prompt template.
 
-**Reference catering domain.** Realistic seeded data including trucks, employees, venues, events, assignments, and shifts. A non-trivial simulation covering trucks travelling between venues, loading and unloading time, employee shifts, event durations, and breakdowns modelled as a stochastic event. A set of demo what-if scenarios that produce meaningful outcome differences.
+**Reference catering domain.** Realistic seeded data including trucks, employees, venues, events, assignments, and shifts. A non-trivial simulation covering trucks travelling between venues, loading and unloading time, event durations, and breakdowns modelled as a stochastic event that occupies a truck for a sampled repair duration. Employee `Shift` rows are stored for the agent to query, but per D30 the v1 simulation treats every seeded employee as available across the sim window. A set of demo what-if scenarios that produce meaningful outcome differences.
 
 **React frontend, as a separate package in the monorepo.** A map view using MapLibre GL showing trucks, venues, and events with live position updates over WebSocket, with two map modes (baseline and what-if) that are switchable or side-by-side. A chat panel using CopilotKit connected to the Pydantic AI agent. A scenario comparison view showing baseline versus what-if metrics in a small fixed set of visualisations covering on-time rate, utilisation, cost, and customer-facing outcomes. A simulation timeline scrubber for replaying time.
 

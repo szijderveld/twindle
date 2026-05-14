@@ -56,7 +56,7 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 **Deliverables.** None. This is a gate.
 
-**Acceptance criteria.** SCOPE.md has no "Open items" section (or it is empty). DECISIONS.md contains entries D1 through D26, in order, with no gaps. The name in D1 matches the name used throughout SCOPE.md and the rest of DECISIONS.md. If any of these fail, fix the planning documents before proceeding to step 1; do not start coding.
+**Acceptance criteria.** SCOPE.md has no "Open items" section (or it is empty). DECISIONS.md contains entries D1 through D30, in order, with no gaps. The name in D1 matches the name used throughout SCOPE.md and the rest of DECISIONS.md. If any of these fail, fix the planning documents before proceeding to step 1; do not start coding.
 
 **On success.** Mark this step complete in PLAN.md only. No commit (no code yet).
 
@@ -76,7 +76,7 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 **Deliverables.**
 
-- `pyproject.toml` declaring the `twindle` package, Python 3.11+, dependencies pinned to current stable. Runtime: sqlmodel, pydantic, pydantic-ai (with the `ag-ui` extra), simpy, fastapi, uvicorn, websockets, aiosqlite. Dev: pytest, pytest-asyncio, ruff, mypy. Use PEP 735 `[dependency-groups]` for the dev group.
+- `pyproject.toml` declaring the `twindle` package, Python 3.11+, dependencies pinned to current stable. Runtime: sqlmodel, pydantic, pydantic-ai (with the `ag-ui` extra), simpy, fastapi, uvicorn, websockets, aiosqlite, mcp-alchemy (the SQL fallback MCP server, per D29). Dev: pytest, pytest-asyncio, ruff, mypy. Use PEP 735 `[dependency-groups]` for the dev group.
 - `uv.lock` committed.
 - `src/twindle/__init__.py` with version string only.
 - `tests/test_smoke.py` with a single `def test_imports(): import twindle` test.
@@ -111,18 +111,17 @@ The single source of truth contract: *for a domain that uses only the declarativ
 - **Declarative simulation fields**, in the same module:
   - `Duration` — Pydantic value object describing how long a process takes. Fields: `mean: float` (in simulation time units), `distribution: Literal["constant","triangular","normal","exponential","lognormal"] = "constant"`, optional `min: float`, `max: float`, `std: float`. The engine layer samples from it; the agent layer introspects it.
   - `ResourceRequirement` — Pydantic value object. Fields: `resource_type: type[Resource]` (or a string class name for serialisation), `quantity: int = 1`, `mode: Literal["occupy","consume"] = "occupy"`. `Process` instances carry a `requires: list[ResourceRequirement]`.
-  - `Resource.capacity: int = 1` — base number of units / pool size for that resource class.
+  - `Resource.capacity: int = 1` — base number of units / pool size for that resource class. Per D30, capacity is fixed for the duration of any simulation run.
   - `Process` gains `duration: Duration` and `requires: list[ResourceRequirement]` (defaulting to empty). These are declarative fields the engine reads; subclasses set them as class-level defaults or per-instance.
-  - `CapacityWindow` — a SQLModel base class with `resource_id` FK, `start_time`, `end_time`, `capacity: int`. Rows of this kind override a resource's base capacity within `[start_time, end_time)`. A domain uses this to express seasonal fleet changes, shift coverage, planned maintenance windows, etc.
 - A field-role annotations module in the domain layer defining `query_field`, `sim_field`, `viz_field` (as `Annotated` metadata or Pydantic `Field` extras). Passive markers the agent and frontend introspect later.
 - Docstrings on every base type and value object stating its role.
-- Tests under `tests/domain/` covering: a trivial subclass of each SQLModel base can be defined; `Duration` validates its distribution-specific fields (e.g. triangular requires `min` and `max`); `ResourceRequirement` round-trips through JSON; SQLModel builds a SQLite schema including `CapacityWindow`; an instance of each base type round-trips through a session.
+- Tests under `tests/domain/` covering: a trivial subclass of each SQLModel base can be defined; `Duration` validates its distribution-specific fields (e.g. triangular requires `min` and `max`); `ResourceRequirement` round-trips through JSON; SQLModel builds a SQLite schema; an instance of each base type round-trips through a session.
 
-**Acceptance criteria.** All tests pass. mypy strict passes. Importing the domain `base` module produces no warnings. The seven SQLModel base classes are named exactly as in D10. A trivial domain can express a process's full simulation behaviour — duration, resource needs, and time-varying capacity — using only fields declared here, with no SimPy import.
+**Acceptance criteria.** All tests pass. mypy strict passes. Importing the domain `base` module produces no warnings. The seven SQLModel base classes are named exactly as in D10. A trivial domain can express a process's full v1 simulation behaviour — duration and resource needs (at fixed capacity) — using only fields declared here, with no SimPy import. Time-varying capacity is explicitly deferred to v1.1 per D30 and is not part of this step.
 
 **On success.** Commit `step 2: implement base type taxonomy`.
 
-**On failure.** Re-read D10 and the SCOPE.md base-types paragraph; the names and roles of the seven SQLModel types are fixed. The value objects (`Duration`, `ResourceRequirement`, `CapacityWindow`) may be refined in shape but their *responsibilities* — timing, requirements, time-varying capacity — must all be expressible declaratively before this step is considered done.
+**On failure.** Re-read D10 and the SCOPE.md base-types paragraph; the names and roles of the seven SQLModel types are fixed. The value objects (`Duration`, `ResourceRequirement`) may be refined in shape but their *responsibilities* — timing and requirements — must be expressible declaratively before this step is considered done.
 
 ---
 
@@ -185,7 +184,7 @@ The single source of truth contract: *for a domain that uses only the declarativ
 **Deliverables.**
 
 - `src/twindle/query/tools.py` with `build_query_tools(domain_module)` that introspects a module for SQLModel classes inheriting from `Entity` and generates, for each: `list_<entity>()`, `get_<entity>_by_id(id)`, `filter_<entity>(**kwargs)`. Tools are plain async functions taking a session, returning Pydantic-validated rows.
-- `src/twindle/query/sql.py` with a `run_sql(query: str, session)` fallback that allows read-only `SELECT` and raises on anything else.
+- `src/twindle/query/sql.py` with a small `run_sql(query: str, session)` helper that allows read-only `SELECT` and raises on anything else. This is a thin-slice helper for proving the query path end to end before the agent layer exists; per D29 it is superseded at step 8 by mcp-alchemy mounted as an MCP server, and is dropped from the agent's tool surface at that point.
 - `tests/e2e/test_thin_slice.py` defining a one-entity domain inline (e.g. `Truck(Entity)` with a `capacity` field), creating a schema, seeding three rows, calling each generated tool, and the fallback `run_sql`.
 
 **Acceptance criteria.** All tests pass. The generated tool names follow the `<verb>_<entity>` convention. `run_sql` rejects an `INSERT`.
@@ -198,23 +197,22 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 - [ ] complete
 
-**Goal.** A synchronous simulation runner that *interprets* the declarative fields on the domain (process duration, resource requirements, base capacity, capacity windows) to build the SimPy graph, runs it to completion, and writes results to `SimulationEvent` and `SimulationState` tagged with `scenario_id`. Domain-specific Python is an escape hatch, not the default path.
+**Goal.** A synchronous simulation runner that *interprets* the declarative fields on the domain (process duration, resource requirements, fixed base capacity) to build the SimPy graph, runs it to completion, and writes results to `SimulationEvent` and `SimulationState` tagged with `scenario_id`. Domain-specific Python is an escape hatch, not the default path. Per D30, capacity is fixed for the whole run — there is no mid-run resize mechanism in v1.
 
 **Prerequisites.** Step 5.
 
-**Read first.** SCOPE.md "Architectural commitments" (single source of truth, sim output is queryable state, spatial split). DECISIONS.md D9, D15, D16, D23, D24, D25.
+**Read first.** SCOPE.md "Architectural commitments" (single source of truth, sim output is queryable state, spatial split). DECISIONS.md D9, D15, D16, D23, D24, D25, D30.
 
 **Deliverables.**
 
 - A `runtime` module in the engine layer exposing `run_simulation(domain, scenario, session, until) -> ScenarioRunResult`. This is a **synchronous** function. It creates a SimPy `Environment`, materialises entities and `Process` instances from the database using a sync `Session`, applies scenario primitives to the in-memory state, builds the SimPy resource and process graph from the *declared* domain (see below), runs `env.run(until=until)`, and returns when the event loop is empty. Per D23, this function is intended to be called directly from async request handlers and will block them; per D24, all events are written to the database before the function returns.
-- **Declarative interpretation.** For each `Resource` subclass the runtime instantiates a SimPy `Resource` (or `PriorityResource` / `Container` if the `mode` on a requirement implies it) with capacity equal to the base `capacity` field, then applies any active `CapacityWindow` rows to swap capacity at the appropriate sim times (modelled as scheduled SimPy events that resize the resource pool). For each `Process` instance the runtime generates a SimPy process function automatically: it requests the resources listed in `requires` with the specified `quantity`, samples a hold time from `duration`, yields `env.timeout(...)`, releases occupied resources, and emits one `SimulationEvent` row at each transition. The runtime needs no domain-specific code to do any of this.
+- **Declarative interpretation.** For each `Resource` subclass the runtime instantiates a SimPy `Resource` (or `PriorityResource` / `Container` if the `mode` on a requirement implies it) with capacity equal to the base `capacity` field. Capacity does not change during the run (D30). For each `Process` instance the runtime generates a SimPy process function automatically: it requests the resources listed in `requires` with the specified `quantity`, samples a hold time from `duration`, yields `env.timeout(...)`, releases occupied resources, and emits one `SimulationEvent` row at each transition. The runtime needs no domain-specific code to do any of this.
 - **Bespoke escape hatch.** A registration mechanism (e.g. a `@bespoke_process(ProcessClass)` decorator exported from the engine layer, or a `bespoke_processes` attribute on a reference domain module) lets a domain override the auto-generated process for a specific `Process` subclass when its behaviour cannot be expressed declaratively (e.g. stochastic event injectors, processes that branch on simulation state). When such an override is registered, the runtime uses it instead of the declarative interpreter for that class only.
 - A `SimWriter` in the engine layer that the runtime passes to processes (auto-generated and bespoke alike); processes call `writer.event(...)` and `writer.state(...)` and the writer batches inserts to the DB on a configurable threshold and on `flush()` at end of run. The writer does **not** publish to any in-process broker (the WebSocket reads from the DB after the run completes; see D24).
 - A `trace` module in the engine layer exposing `get_trace(scenario_id, entity_type, entity_id, session)` (ordered events for one entity in one scenario) and `get_event_trace(scenario_id, event_id, session)` (all simulation events relating to a single domain `Event` across all participating entities — supports "why did event 47 finish late?").
 - Tests under `tests/simulation/`:
   - `test_runtime_declarative.py`: a domain with one `Resource` subclass (capacity 2), one `Process` subclass with `Duration(mean=5, distribution="constant")` and `requires=[ResourceRequirement(That Resource, 1)]`, three `Process` instances. Asserts that the runtime executes all three without any domain-specific Python, that two run concurrently and the third queues, and that events land with the right `scenario_id`.
-  - `test_runtime_capacity_window.py`: same domain plus a `CapacityWindow` that drops capacity to 1 in `[10, 20)`. Asserts the queueing behaviour changes during the window and recovers after.
-  - `test_runtime_bespoke.py`: registers a bespoke override for one `Process` subclass and asserts the override fires instead of the auto-generated path.
+  - `test_runtime_bespoke.py`: registers a bespoke override for one `Process` subclass and asserts the override fires instead of the auto-generated path. The override is used in step 13 to demonstrate that "occupy the resource for a sampled duration" is enough to model temporary unavailability without needing capacity changes.
   - `test_trace.py`: asserts `get_trace` returns events in order for one entity, and `get_event_trace` returns events for all entities participating in a given domain event.
 
 **Acceptance criteria.** Tests pass. A second `run_simulation` call with a different `scenario_id` does not overwrite or mix with the first run's rows. `run_simulation` is annotated and behaves as a synchronous function (not `async def`). **A reference domain that uses only the declarative facilities runs end to end with zero bespoke process code** (verified by `test_runtime_declarative.py` and the matching catering check in step 13).
@@ -250,23 +248,23 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 - [ ] complete
 
-**Goal.** A function that, given a domain module, returns a list of Pydantic AI tools spanning: typed query tools, the `run_sql` fallback, scenario construction tools (one per primitive), `run_scenario`, `get_trace`, `get_event_trace`, and introspection tools for the declarative simulation fields on the domain.
+**Goal.** A function that, given a domain module, returns a list of Pydantic AI tools spanning: typed query tools, the ad-hoc SQL fallback (mcp-alchemy via MCP), scenario construction tools (one per primitive), `run_scenario`, `get_trace`, `get_event_trace`, and introspection tools for the declarative simulation fields on the domain.
 
 **Prerequisites.** Step 7.
 
-**Read first.** SCOPE.md "Architectural commitments" (single source of truth, generated agent tool surface). DECISIONS.md D13, D14.
+**Read first.** SCOPE.md "Architectural commitments" (single source of truth, generated agent tool surface). DECISIONS.md D13, D14, D29, D30.
 
 **Deliverables.**
 
-- A `builder` module in the agent layer exposing `build_tool_surface(domain_module) -> list[Tool]`. Tools wrap step 5's query tools, step 6's `run_simulation`, `get_trace`, and `get_event_trace`, and one tool per scenario primitive that returns a primitive instance (the agent composes a `Scenario` by calling these). The `run_scenario` tool wraps `run_simulation`; since `run_simulation` is synchronous (D23), the tool is implemented as a Pydantic AI tool that simply calls it and returns when it returns.
+- A `builder` module in the agent layer exposing `build_tool_surface(domain_module) -> list[Tool]`. Tools wrap step 5's typed query tools, step 6's `run_simulation`, `get_trace`, and `get_event_trace`, and one tool per scenario primitive that returns a primitive instance (the agent composes a `Scenario` by calling these). The `run_scenario` tool wraps `run_simulation`; since `run_simulation` is synchronous (D23), the tool is implemented as a Pydantic AI tool that simply calls it and returns when it returns.
+- **SQL fallback via mcp-alchemy.** Per D29, the framework launches mcp-alchemy as a stdio MCP subprocess bound to the persistence engine and registers it on the Pydantic AI agent (e.g. via `pydantic_ai.mcp.MCPServerStdio`). mcp-alchemy's `list_tables`, `describe_table`, and `execute_query` tools become available to the agent alongside the typed query tools. The step-5 `run_sql` helper is no longer exposed in the agent's tool surface from this step onwards. Subprocess lifecycle (start at app boot, terminate at shutdown) is wired in step 9.
 - **Declarative-field introspection tools** (all auto-generated from the domain):
   - `describe_process(process_type: str)` — returns the process's declared `Duration` (mean, distribution, bounds) and `requires` list.
-  - `get_resource_capacity(resource_type: str, at_time: datetime | None = None)` — returns base capacity, or effective capacity at `at_time` after applying any active `CapacityWindow` rows.
-  - `list_capacity_windows(resource_type: str, *, between: tuple[datetime, datetime] | None = None)` — returns the `CapacityWindow` rows for that resource, optionally restricted to a time range.
+  - `get_resource_capacity(resource_type: str)` — returns the base capacity declared on the resource class. Per D30, capacity is fixed for the run, so this tool takes no time parameter.
 - A `prompt` module in the agent layer containing a template that consumes domain class docstrings, field descriptions, and the declared `Duration` / `requires` on each `Process` subclass to produce a system prompt naming the entities, the typed tools, the scenario vocabulary, and a one-line summary of each process's timing and resource needs.
-- Tests under `tests/agent/test_builder.py` asserting: for the one-entity test domain extended with one `Process` subclass and one `CapacityWindow`, the expected tool names exist (including `describe_process`, `get_resource_capacity`, `list_capacity_windows`); tool schemas validate; the rendered prompt contains the entity name, the six primitive names, and the declared duration of the process.
+- Tests under `tests/agent/test_builder.py` asserting: for the one-entity test domain extended with one `Process` subclass, the expected tool names exist (including `describe_process`, `get_resource_capacity`); tool schemas validate; the mcp-alchemy MCP server is registered and exposes `execute_query` to the agent; the rendered prompt contains the entity name, the six primitive names, and the declared duration of the process. Tests may launch mcp-alchemy against a temporary SQLite file.
 
-**Acceptance criteria.** Tests pass. Tool descriptions are non-empty and derived from the domain (not hard-coded). The agent can answer "what is the effective capacity of resource X at time T" purely from the declarative-introspection tools without falling back to `run_sql`.
+**Acceptance criteria.** Tests pass. Tool descriptions are non-empty and derived from the domain (not hard-coded). The agent can answer "what is the capacity of resource X" purely from the declarative-introspection tools without falling back to `execute_query`. mcp-alchemy starts cleanly and rejects non-SELECT statements end to end.
 
 **On success.** Commit `step 8: agent tool generation`.
 
@@ -284,7 +282,7 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 **Deliverables.**
 
-- `src/twindle/agent/server.py` exposing `make_app(domain_module, engine)` that returns a FastAPI app with one `/chat` route handled by the Pydantic AI agent and the AG-UI adapter. The agent's tools come from `build_tool_surface`. The agent's system prompt comes from `prompt.render(domain_module)`.
+- `src/twindle/agent/server.py` exposing `make_app(domain_module, engine)` that returns a FastAPI app with one `/chat` route handled by the Pydantic AI agent and the AG-UI adapter. The agent's tools come from `build_tool_surface`. The agent's system prompt comes from `prompt.render(domain_module)`. The app's lifespan handler starts the mcp-alchemy subprocess (per D29) at boot, points it at the engine's SQLite file, and terminates it on shutdown.
 - A small CLI `twindle.cli` (e.g. `python -m twindle.cli serve --domain twindle.reference.catering.domain`) that boots the server with a chosen domain.
 - `tests/agent/test_server.py` using FastAPI's TestClient and a stub LLM (Pydantic AI's test model) to assert: a `/chat` POST that triggers a tool call returns a streamed AG-UI event sequence including a tool call and a final assistant message. Tests do not call a real LLM.
 
@@ -334,7 +332,7 @@ The single source of truth contract: *for a domain that uses only the declarativ
   - `EventSetup(Process)` — duration distribution; requires one `Truck` (occupied) plus N `Employee`s.
   - `EventService(Process)` — duration tied to the `CateringEvent` size; requires N `Employee`s.
   - `EventTeardown(Process)` — duration distribution; requires N `Employee`s and (optionally) one `Truck`.
-- **Capacity windows.** `CapacityWindow` rows declared (or generated in the seed step) to express: shift coverage for employees (only on-shift employees count toward effective capacity at a given time), and any other time-varying capacity the catering business has. No bespoke shift-handling code: the runtime resolves effective capacity from `CapacityWindow` rows automatically.
+- **Shifts are data, not sim constraints in v1.** Per D30, capacity is fixed for the simulation run. The catering domain stores `Shift` rows so the agent can answer queries about shift history and assignments, but the runtime treats every seeded `Employee` as available across the entire simulation window. No `CapacityWindow` is declared, generated, or interpreted. Shift-driven availability returns in v1.1 when time-varying capacity is reintroduced.
 - **No bespoke process file in this step.** `truck_breakdown` is deferred to step 13 because it is a stochastic event injector and does not fit the declarative spec. No other catering process file is created here.
 - Tests under `tests/reference/catering/`:
   - `test_domain.py`: every catering entity inherits from the correct framework base; the schema builds without error; the generated tool surface (step 8) includes a list/get/filter tool for every catering entity and `describe_process` returns non-empty timing/requirements for each declared process.
@@ -379,14 +377,14 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 **Prerequisites.** Step 12.
 
-**Read first.** SCOPE.md "v1 capability bar" and the catering paragraph of "In scope for v1". DECISIONS.md D9, D16, D23. Step 6 (bespoke escape hatch) and step 11 (declared processes).
+**Read first.** SCOPE.md "v1 capability bar" and the catering paragraph of "In scope for v1". DECISIONS.md D9, D16, D23, D30. Step 6 (bespoke escape hatch) and step 11 (declared processes).
 
 **Deliverables.**
 
-- A small bespoke module in the catering reference implementing `truck_breakdown` as a registered override (per the bespoke escape hatch in step 6): a stochastic event injector that periodically samples a breakdown event, removes the affected truck from the available pool for a sampled repair duration via the engine's capacity-window mechanism, and re-adds it. No other catering process is implemented here — `TruckTravel`, `EventSetup`, `EventService`, `EventTeardown` continue to run through the engine's declarative interpreter using their step-11 declarations.
+- A small bespoke module in the catering reference implementing `truck_breakdown` as a registered override (per the bespoke escape hatch in step 6): a stochastic event injector that periodically samples a breakdown event and starts a long-running "repair" SimPy process that occupies the affected truck (holds a unit of the `Truck` resource) for a sampled repair duration. While the repair process holds the unit, no other catering process can acquire that truck. When the repair completes, the unit is released back to the pool. Per D30, this occupy-and-release pattern is the v1 way to model temporary unavailability — no capacity resize is involved.
 - The bespoke module is short: target under 100 lines including imports and docstrings. If it grows beyond that, audit whether parts can be lifted into the declarative spec.
-- A demo scenarios module in the catering reference exporting at minimum: "add two more trucks during summer weekends" (uses `AddEntity` + `CapacityWindow`), "increase event duration by 20%" (`ScaleParameter` on `Duration.mean`), "remove one truck for a week" (`CapacityWindow` reducing fleet capacity).
-- Tests under `tests/reference/catering/test_simulation.py` asserting: a baseline simulation over one week of seeded data completes; on-time arrival rates can be derived from the trace; the "add two trucks" scenario produces a measurably different on-time rate from baseline; the breakdown injector actually removes and restores truck capacity (verified by inspecting `CapacityWindow` rows or trace events).
+- A demo scenarios module in the catering reference exporting at minimum: "add two more trucks to the fleet" (two `AddEntity` primitives for `Truck`), "increase event duration by 20%" (`ScaleParameter` on `Duration.mean`), "remove one truck" (`RemoveEntity` for a `Truck`). All three apply to the full sim window; per D30 there is no sub-window framing in v1.
+- Tests under `tests/reference/catering/test_simulation.py` asserting: a baseline simulation over one week of seeded data completes; on-time arrival rates can be derived from the trace; the "add two trucks" scenario produces a measurably different on-time rate from baseline; the breakdown injector actually occupies and releases trucks (verified by inspecting trace events for repair-process start/end on the affected truck).
 
 **Acceptance criteria.** Tests pass. Baseline simulation over a week completes in under 30 seconds. The "add two trucks" scenario changes on-time rate by at least one percentage point. Bespoke catering code is under 100 lines.
 
@@ -406,7 +404,7 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 **Deliverables.**
 
-- `frontend/package.json` declaring Next.js (App Router), TypeScript, React, MapLibre GL, CopilotKit (`@copilotkit/react-core`, `@copilotkit/react-ui`, `@copilotkit/runtime`), and `@ag-ui/client`. pnpm is the package manager; `pnpm-lock.yaml` is committed.
+- `frontend/package.json` declaring Next.js (App Router), TypeScript, React, MapLibre GL, deck.gl (`deck.gl` and `@deck.gl/geo-layers` for `TripsLayer`, per D28), CopilotKit (`@copilotkit/react-core`, `@copilotkit/react-ui`, `@copilotkit/runtime`), and `@ag-ui/client`. pnpm is the package manager; `pnpm-lock.yaml` is committed.
 - `frontend/src/app/layout.tsx` and `frontend/src/app/page.tsx` rendering a four-pane layout (map, chat, timeline, comparison) with placeholder content in each. The `<CopilotKit>` provider wraps the page tree and points at `/api/copilotkit` as its `runtimeUrl`.
 - `frontend/src/app/api/copilotkit/route.ts` mounting CopilotKit's runtime against the Pydantic AI backend using `HttpAgent` from `@ag-ui/client`, following the pattern in CopilotKit's `pydantic-ai-todos` showcase. The agent name and the backend URL are read from environment variables (`AGENT_URL`, default `http://localhost:8000/`).
 - `frontend/tsconfig.json` with `strict: true`.
@@ -423,21 +421,21 @@ The single source of truth contract: *for a domain that uses only the declarativ
 
 - [ ] complete
 
-**Goal.** The map renders venues as markers and trucks as moving markers driven by the WebSocket playback stream. Truck positions interpolate smoothly between waypoints.
+**Goal.** The map renders venues as markers and trucks as moving paths driven by the WebSocket playback stream. Position interpolation is handled by deck.gl's `TripsLayer` per D28; Twindle does not implement its own interpolation.
 
 **Prerequisites.** Step 14.
 
-**Read first.** SCOPE.md "Architectural commitments" (spatial split). DECISIONS.md D16, D18, D24.
+**Read first.** SCOPE.md "Architectural commitments" (spatial split). DECISIONS.md D16, D18, D24, D28.
 
 **Deliverables.**
 
-- `frontend/src/components/Map.tsx` rendering a MapLibre GL map centred on the catering region, showing venue markers and truck markers.
-- `frontend/src/api/ws.ts` connecting to `/ws/sim/{scenario_id}`, parsing waypoint messages, and feeding them to the map. The hook also sends pause/resume/seek control messages back over the socket.
-- A small interpolation utility that, given waypoints and the current playback time, returns the truck's current lat/lng.
+- `frontend/src/components/Map.tsx` rendering a MapLibre GL base map centred on the catering region, with venue markers and a deck.gl overlay. Truck animation is rendered by `TripsLayer` (from `@deck.gl/geo-layers`), fed per-truck `path` (array of `[lng, lat]`) and `timestamps` (parallel array of sim times) and driven by a `currentTime` prop. There is no hand-rolled interpolation utility; `TripsLayer` interpolates internally.
+- `frontend/src/api/ws.ts` connecting to `/ws/sim/{scenario_id}`, parsing waypoint messages, and accumulating per-truck `path` and `timestamps` arrays in the shape `TripsLayer` consumes. The hook also sends pause/resume/seek control messages back over the socket.
+- `currentTime` is held in a small React state owned by the page; the WebSocket advances it as messages arrive, and the timeline scrubber (step 17) overrides it. Seeking and pausing become local state changes on `currentTime`, not WebSocket round-trips, except where the user wants the server to skip ahead in its emission rate.
 - Two map modes (baseline and what-if) selectable from a toggle in the UI; both share the same map component, parameterised by `scenario_id`.
-- A Playwright or Vitest-component test (whichever the team set up in step 14) asserting the map mounts and that, given a fixed waypoint sequence in a stubbed WebSocket, the truck marker moves between two coordinates over time.
+- A Playwright or Vitest-component test (whichever the team set up in step 14) asserting the map mounts and that, given a fixed waypoint sequence in a stubbed WebSocket and a fixed `currentTime`, the rendered truck position matches the expected interpolated point on the path.
 
-**Acceptance criteria.** Frontend tests pass. Manual check: with the agent server running and the baseline simulation already recorded, opening the frontend and connecting to the baseline `scenario_id` shows trucks visibly moving between venues at playback speed 1.0.
+**Acceptance criteria.** Frontend tests pass. Manual check: with the agent server running and the baseline simulation already recorded, opening the frontend and connecting to the baseline `scenario_id` shows trucks visibly moving between venues at playback speed 1.0, with trails rendered by `TripsLayer`.
 
 **On success.** Commit `step 15: map view with interpolation`.
 
@@ -479,7 +477,7 @@ The single source of truth contract: *for a domain that uses only the declarativ
 **Deliverables.**
 
 - `frontend/src/components/Comparison.tsx` showing, for a baseline `scenario_id` and a what-if `scenario_id`, four metrics: on-time rate, truck utilisation, total cost, customer-facing outcome score. Bar charts or simple side-by-side numerics, not custom visualisations.
-- `frontend/src/components/Timeline.tsx` showing the simulation's time range with a scrubber. The scrubber's value drives the map's playback time.
+- `frontend/src/components/Timeline.tsx` showing the simulation's time range with a scrubber. The scrubber's value writes directly to the `currentTime` state that the map's `TripsLayer` consumes (per D28), so seeking moves trucks to their interpolated position at that time without re-fetching from the WebSocket.
 - Backend support for these views: an HTTP endpoint that, given a `scenario_id`, returns aggregated metrics computed from `SimulationEvent` / `SimulationState`.
 - Tests on the metrics endpoint asserting baseline and what-if return different numbers for the demo "add two trucks" scenario.
 
