@@ -26,98 +26,21 @@ These apply to every step. Steps do not restate them.
 - **Style:** terse, no marketing language in docstrings or comments. Docstrings on public classes and functions only. Single-line docstrings unless behaviour is non-obvious.
 - **No premature abstraction.** A second implementation of anything is the trigger for an abstraction, not the first.
 
-## Module layout (target)
+## Layer responsibilities (not a file tree)
 
-```
-twindle/
-  pyproject.toml
-  uv.lock
-  README.md
-  SCOPE.md
-  DECISIONS.md
-  PLAN.md
-  LICENSE
-  .github/
-    workflows/
-      ci.yml
-  src/
-    twindle/
-      __init__.py
-      domain/
-        __init__.py
-        base.py            # Entity, Resource, Process, Event, Schedule, Assignment, Location
-        annotations.py     # field role markers (query, sim, viz)
-      persistence/
-        __init__.py
-        engine.py          # SQLModel/SQLAlchemy engine + session factory
-        snapshot.py        # baseline DB snapshot, scenario-tagged tables
-      scenarios/
-        __init__.py
-        model.py           # Scenario base
-        primitives.py      # AddEntity, RemoveEntity, ModifyAttribute, ScaleParameter, ChangeSchedule, InjectEvent
-        registry.py        # domain-supplied primitive registration
-      simulation/
-        __init__.py
-        runtime.py         # SimPy environment, process orchestration
-        writer.py          # writes simulation_events / simulation_state
-        trace.py           # per-event trace inspection
-      query/
-        __init__.py
-        tools.py           # generated typed query tools
-        sql.py             # run_sql fallback
-      agent/
-        __init__.py
-        builder.py         # introspects domain, builds tool surface + prompt
-        prompt.py          # prompt template
-        server.py          # Pydantic AI app + AG-UI adapter
-      transport/
-        __init__.py
-        ws.py              # WebSocket sim stream
-        http.py            # HTTP routes (FastAPI)
-      testing/
-        __init__.py
-        fixtures.py        # reusable pytest fixtures (in-memory DB, fake clock)
-      reference/
-        __init__.py
-        catering/
-          __init__.py
-          domain.py        # all catering entities, single source of truth
-          processes.py     # SimPy processes for catering
-          seed.py          # realistic seed data generator
-          scenarios.py     # demo what-if scenarios
-  frontend/
-    package.json
-    pnpm-lock.yaml
-    next.config.ts
-    tsconfig.json
-    src/
-      app/
-        layout.tsx
-        page.tsx
-        api/
-          copilotkit/
-            route.ts        # mounts CopilotKit runtime against AG-UI HttpAgent
-      api/
-        ws.ts               # client hook for /ws/sim/{scenario_id}
-        chat.ts             # any glue for the AG-UI message format
-      components/
-        Map.tsx
-        Chat.tsx
-        Timeline.tsx
-        Comparison.tsx
-      types/
-        domain.ts           # generated from twindle domain
-  tests/
-    domain/
-    persistence/
-    scenarios/
-    simulation/
-    query/
-    agent/
-    reference/
-      catering/
-    e2e/
-```
+The framework is organised by layer, not by a prescribed file tree. Steps below name modules by their *layer role* and the public API they must expose; the exact filenames and submodule split are an implementation detail. As a rule of thumb each layer fits under one top-level package under `src/twindle/`, but a layer may grow or shrink files as needed.
+
+- **Domain layer.** The base type taxonomy (`Entity`, `Resource`, `Process`, `Event`, `Schedule`, `Assignment`, `Location`, plus the declarative value objects below) and field role annotations. This is what reference domains subclass.
+- **Engine layer.** The framework guts: persistence (engine, sessions, scenario-tagged simulation tables), scenario application, simulation runtime + writer + trace, query tool generator, and the read-only `run_sql` fallback. These are domain-agnostic.
+- **Agent layer.** Tool surface builder, prompt template, FastAPI app with the Pydantic AI AG-UI adapter, CLI entry point.
+- **Transport layer.** WebSocket route for simulation playback. HTTP wiring beyond what the agent owns.
+- **Testing layer.** Shared pytest fixtures (in-memory DB, fake clock, stub LLM).
+- **Reference domain(s).** A reference domain is the single source of truth for its business: entities, processes, capacity windows, scenarios, seed data — co-located. v1 ships one such domain (catering). The reference domain only contains *bespoke* code that cannot be expressed declaratively against the domain layer's value objects.
+- **Frontend.** Next.js package under `frontend/` (separate package; see D5, D18, D26).
+
+Tests mirror the package they cover; layout under `tests/` is otherwise unconstrained.
+
+The single source of truth contract: *for a domain that uses only the declarative facilities of the domain layer, the engine layer can build, run, and query a simulation with zero domain-specific code.* Bespoke per-domain code is an escape hatch for behaviour that does not fit the declarative spec, not the primary mechanism.
 
 ## Steps
 
@@ -176,24 +99,30 @@ twindle/
 
 - [ ] complete
 
-**Goal.** The seven base types in `twindle.domain.base` exist as SQLModel classes that can be subclassed in a domain module.
+**Goal.** The base taxonomy in the domain layer exists as SQLModel classes and Pydantic value objects rich enough that a domain can declare *everything the simulation needs* — process timing, resource requirements, resource capacity, and capacity changes over time — without writing bespoke simulation code.
 
 **Prerequisites.** Step 1.
 
-**Read first.** SCOPE.md "Architectural commitments" (base types paragraph). DECISIONS.md D7, D10.
+**Read first.** SCOPE.md "Architectural commitments" (base types paragraph, single source of truth). DECISIONS.md D7, D9, D10.
 
 **Deliverables.**
 
-- `src/twindle/domain/base.py` defining `Entity`, `Resource`, `Process`, `Event`, `Schedule`, `Assignment`, `Location` as SQLModel base classes. Each carries a primary key `id`, a `name` field where appropriate, and timestamps where appropriate. `Location` carries `latitude` and `longitude`. `Event` carries `start_time`, `end_time`, a foreign key to `Location`. `Assignment` carries foreign keys to `Resource` and `Event`. `Schedule` carries a foreign key to `Process` and time bounds.
-- `src/twindle/domain/annotations.py` defining field role markers: `query_field`, `sim_field`, `viz_field` (as `Annotated` metadata or Pydantic `Field` extras). These are passive markers that later steps will introspect.
-- Docstrings on every base type stating its role.
-- `tests/domain/test_base.py` exercising: a trivial subclass of each base type can be defined; SQLModel can create a SQLite schema from them; an instance round-trips through a session.
+- A `base` module in the domain layer defining the seven SQLModel base classes — `Entity`, `Resource`, `Process`, `Event`, `Schedule`, `Assignment`, `Location` — plus the declarative value objects below. Each SQLModel base carries a primary key `id`, a `name` where appropriate, and timestamps where appropriate. `Location` carries `latitude` and `longitude`. `Event` carries `start_time`, `end_time`, and a foreign key to `Location`. `Assignment` carries foreign keys to `Resource` and `Event`. `Schedule` carries a foreign key to `Process` and time bounds.
+- **Declarative simulation fields**, in the same module:
+  - `Duration` — Pydantic value object describing how long a process takes. Fields: `mean: float` (in simulation time units), `distribution: Literal["constant","triangular","normal","exponential","lognormal"] = "constant"`, optional `min: float`, `max: float`, `std: float`. The engine layer samples from it; the agent layer introspects it.
+  - `ResourceRequirement` — Pydantic value object. Fields: `resource_type: type[Resource]` (or a string class name for serialisation), `quantity: int = 1`, `mode: Literal["occupy","consume"] = "occupy"`. `Process` instances carry a `requires: list[ResourceRequirement]`.
+  - `Resource.capacity: int = 1` — base number of units / pool size for that resource class.
+  - `Process` gains `duration: Duration` and `requires: list[ResourceRequirement]` (defaulting to empty). These are declarative fields the engine reads; subclasses set them as class-level defaults or per-instance.
+  - `CapacityWindow` — a SQLModel base class with `resource_id` FK, `start_time`, `end_time`, `capacity: int`. Rows of this kind override a resource's base capacity within `[start_time, end_time)`. A domain uses this to express seasonal fleet changes, shift coverage, planned maintenance windows, etc.
+- A field-role annotations module in the domain layer defining `query_field`, `sim_field`, `viz_field` (as `Annotated` metadata or Pydantic `Field` extras). Passive markers the agent and frontend introspect later.
+- Docstrings on every base type and value object stating its role.
+- Tests under `tests/domain/` covering: a trivial subclass of each SQLModel base can be defined; `Duration` validates its distribution-specific fields (e.g. triangular requires `min` and `max`); `ResourceRequirement` round-trips through JSON; SQLModel builds a SQLite schema including `CapacityWindow`; an instance of each base type round-trips through a session.
 
-**Acceptance criteria.** All tests pass. mypy strict passes. Importing `twindle.domain.base` produces no warnings.
+**Acceptance criteria.** All tests pass. mypy strict passes. Importing the domain `base` module produces no warnings. The seven SQLModel base classes are named exactly as in D10. A trivial domain can express a process's full simulation behaviour — duration, resource needs, and time-varying capacity — using only fields declared here, with no SimPy import.
 
 **On success.** Commit `step 2: implement base type taxonomy`.
 
-**On failure.** Re-read D10 and the SCOPE.md base-types paragraph; the names and roles are fixed and must match exactly.
+**On failure.** Re-read D10 and the SCOPE.md base-types paragraph; the names and roles of the seven SQLModel types are fixed. The value objects (`Duration`, `ResourceRequirement`, `CapacityWindow`) may be refined in shape but their *responsibilities* — timing, requirements, time-varying capacity — must all be expressible declaratively before this step is considered done.
 
 ---
 
@@ -269,22 +198,26 @@ twindle/
 
 - [ ] complete
 
-**Goal.** A synchronous simulation runner that, given a domain module, a `Scenario`, and a database snapshot, runs SimPy processes and writes results to `SimulationEvent` and `SimulationState` tagged with `scenario_id`.
+**Goal.** A synchronous simulation runner that *interprets* the declarative fields on the domain (process duration, resource requirements, base capacity, capacity windows) to build the SimPy graph, runs it to completion, and writes results to `SimulationEvent` and `SimulationState` tagged with `scenario_id`. Domain-specific Python is an escape hatch, not the default path.
 
 **Prerequisites.** Step 5.
 
-**Read first.** SCOPE.md "Architectural commitments" (sim output is queryable state, spatial split). DECISIONS.md D9, D15, D16, D23, D24, D25.
+**Read first.** SCOPE.md "Architectural commitments" (single source of truth, sim output is queryable state, spatial split). DECISIONS.md D9, D15, D16, D23, D24, D25.
 
 **Deliverables.**
 
-- `src/twindle/simulation/runtime.py` exposing `run_simulation(domain, scenario, session, until) -> ScenarioRunResult`. This is a **synchronous** function. It creates a SimPy `Environment`, materialises entities from the database using a sync `Session`, applies scenario primitives to the in-memory state, runs registered processes by calling `env.run(until=until)`, and returns when SimPy's event loop is empty. Per D23, this function is intended to be called directly from async request handlers and will block them; per D24, all events are written to the database before the function returns.
-- `src/twindle/simulation/writer.py` exposing a `SimWriter` that the runtime passes to processes; processes call `writer.event(...)` and `writer.state(...)` and the writer batches inserts to the DB on a configurable threshold and on `flush()` at end of run. The writer does **not** publish to any in-process broker (the WebSocket reads from the DB after the run completes; see D24).
-- `src/twindle/simulation/trace.py` exposing `get_trace(scenario_id, entity_type, entity_id, session)` that returns the ordered events for one entity in one scenario. Also exposes `get_event_trace(scenario_id, event_id, session)` that returns all simulation events relating to a single domain `Event` (e.g. catering event 47) across all participating entities, to support the "why did event 47 finish late?" capability.
-- A process registration mechanism in the domain (e.g. a `@process` decorator in `twindle.simulation.runtime` or a `processes` attribute on the domain module) that the runtime discovers.
-- `tests/simulation/test_runtime.py` using the one-entity domain from step 5 extended with a trivial process (a Truck that "drives" for a fixed duration and emits one event), asserting events are written with the correct `scenario_id`.
-- `tests/simulation/test_trace.py` asserting `get_trace` returns events in order for one entity, and `get_event_trace` returns events for all entities participating in a given domain event.
+- A `runtime` module in the engine layer exposing `run_simulation(domain, scenario, session, until) -> ScenarioRunResult`. This is a **synchronous** function. It creates a SimPy `Environment`, materialises entities and `Process` instances from the database using a sync `Session`, applies scenario primitives to the in-memory state, builds the SimPy resource and process graph from the *declared* domain (see below), runs `env.run(until=until)`, and returns when the event loop is empty. Per D23, this function is intended to be called directly from async request handlers and will block them; per D24, all events are written to the database before the function returns.
+- **Declarative interpretation.** For each `Resource` subclass the runtime instantiates a SimPy `Resource` (or `PriorityResource` / `Container` if the `mode` on a requirement implies it) with capacity equal to the base `capacity` field, then applies any active `CapacityWindow` rows to swap capacity at the appropriate sim times (modelled as scheduled SimPy events that resize the resource pool). For each `Process` instance the runtime generates a SimPy process function automatically: it requests the resources listed in `requires` with the specified `quantity`, samples a hold time from `duration`, yields `env.timeout(...)`, releases occupied resources, and emits one `SimulationEvent` row at each transition. The runtime needs no domain-specific code to do any of this.
+- **Bespoke escape hatch.** A registration mechanism (e.g. a `@bespoke_process(ProcessClass)` decorator exported from the engine layer, or a `bespoke_processes` attribute on a reference domain module) lets a domain override the auto-generated process for a specific `Process` subclass when its behaviour cannot be expressed declaratively (e.g. stochastic event injectors, processes that branch on simulation state). When such an override is registered, the runtime uses it instead of the declarative interpreter for that class only.
+- A `SimWriter` in the engine layer that the runtime passes to processes (auto-generated and bespoke alike); processes call `writer.event(...)` and `writer.state(...)` and the writer batches inserts to the DB on a configurable threshold and on `flush()` at end of run. The writer does **not** publish to any in-process broker (the WebSocket reads from the DB after the run completes; see D24).
+- A `trace` module in the engine layer exposing `get_trace(scenario_id, entity_type, entity_id, session)` (ordered events for one entity in one scenario) and `get_event_trace(scenario_id, event_id, session)` (all simulation events relating to a single domain `Event` across all participating entities — supports "why did event 47 finish late?").
+- Tests under `tests/simulation/`:
+  - `test_runtime_declarative.py`: a domain with one `Resource` subclass (capacity 2), one `Process` subclass with `Duration(mean=5, distribution="constant")` and `requires=[ResourceRequirement(That Resource, 1)]`, three `Process` instances. Asserts that the runtime executes all three without any domain-specific Python, that two run concurrently and the third queues, and that events land with the right `scenario_id`.
+  - `test_runtime_capacity_window.py`: same domain plus a `CapacityWindow` that drops capacity to 1 in `[10, 20)`. Asserts the queueing behaviour changes during the window and recovers after.
+  - `test_runtime_bespoke.py`: registers a bespoke override for one `Process` subclass and asserts the override fires instead of the auto-generated path.
+  - `test_trace.py`: asserts `get_trace` returns events in order for one entity, and `get_event_trace` returns events for all entities participating in a given domain event.
 
-**Acceptance criteria.** Tests pass. A second `run_simulation` call with a different `scenario_id` does not overwrite or mix with the first run's rows. `run_simulation` is annotated and behaves as a synchronous function (not `async def`).
+**Acceptance criteria.** Tests pass. A second `run_simulation` call with a different `scenario_id` does not overwrite or mix with the first run's rows. `run_simulation` is annotated and behaves as a synchronous function (not `async def`). **A reference domain that uses only the declarative facilities runs end to end with zero bespoke process code** (verified by `test_runtime_declarative.py` and the matching catering check in step 13).
 
 **On success.** Commit `step 6: simulation runtime`.
 
@@ -317,19 +250,23 @@ twindle/
 
 - [ ] complete
 
-**Goal.** A function that, given a domain module, returns a list of Pydantic AI tools spanning: typed query tools, the `run_sql` fallback, scenario construction tools (one per primitive), `run_scenario`, `get_trace`, and `get_event_trace`.
+**Goal.** A function that, given a domain module, returns a list of Pydantic AI tools spanning: typed query tools, the `run_sql` fallback, scenario construction tools (one per primitive), `run_scenario`, `get_trace`, `get_event_trace`, and introspection tools for the declarative simulation fields on the domain.
 
 **Prerequisites.** Step 7.
 
-**Read first.** SCOPE.md "Architectural commitments" (generated agent tool surface). DECISIONS.md D13, D14.
+**Read first.** SCOPE.md "Architectural commitments" (single source of truth, generated agent tool surface). DECISIONS.md D13, D14.
 
 **Deliverables.**
 
-- `src/twindle/agent/builder.py` exposing `build_tool_surface(domain_module) -> list[Tool]`. Tools wrap step 5's query tools, step 6's `run_simulation`, `get_trace`, and `get_event_trace`, and one tool per scenario primitive that returns a primitive instance (the agent composes a `Scenario` by calling these). The `run_scenario` tool wraps `run_simulation`; since `run_simulation` is synchronous (D23), the tool is implemented as a Pydantic AI tool that simply calls it and returns when it returns.
-- `src/twindle/agent/prompt.py` containing a template that consumes domain class docstrings and field descriptions to produce a system prompt naming the entities, the typed tools, and the scenario vocabulary.
-- `tests/agent/test_builder.py` asserting: for the one-entity test domain, the expected tool names exist; tool schemas validate; the rendered prompt contains the entity name and the six primitive names.
+- A `builder` module in the agent layer exposing `build_tool_surface(domain_module) -> list[Tool]`. Tools wrap step 5's query tools, step 6's `run_simulation`, `get_trace`, and `get_event_trace`, and one tool per scenario primitive that returns a primitive instance (the agent composes a `Scenario` by calling these). The `run_scenario` tool wraps `run_simulation`; since `run_simulation` is synchronous (D23), the tool is implemented as a Pydantic AI tool that simply calls it and returns when it returns.
+- **Declarative-field introspection tools** (all auto-generated from the domain):
+  - `describe_process(process_type: str)` — returns the process's declared `Duration` (mean, distribution, bounds) and `requires` list.
+  - `get_resource_capacity(resource_type: str, at_time: datetime | None = None)` — returns base capacity, or effective capacity at `at_time` after applying any active `CapacityWindow` rows.
+  - `list_capacity_windows(resource_type: str, *, between: tuple[datetime, datetime] | None = None)` — returns the `CapacityWindow` rows for that resource, optionally restricted to a time range.
+- A `prompt` module in the agent layer containing a template that consumes domain class docstrings, field descriptions, and the declared `Duration` / `requires` on each `Process` subclass to produce a system prompt naming the entities, the typed tools, the scenario vocabulary, and a one-line summary of each process's timing and resource needs.
+- Tests under `tests/agent/test_builder.py` asserting: for the one-entity test domain extended with one `Process` subclass and one `CapacityWindow`, the expected tool names exist (including `describe_process`, `get_resource_capacity`, `list_capacity_windows`); tool schemas validate; the rendered prompt contains the entity name, the six primitive names, and the declared duration of the process.
 
-**Acceptance criteria.** Tests pass. Tool descriptions are non-empty and derived from the domain (not hard-coded).
+**Acceptance criteria.** Tests pass. Tool descriptions are non-empty and derived from the domain (not hard-coded). The agent can answer "what is the effective capacity of resource X at time T" purely from the declarative-introspection tools without falling back to `run_sql`.
 
 **On success.** Commit `step 8: agent tool generation`.
 
@@ -379,29 +316,35 @@ twindle/
 
 ---
 
-### Step 11: Design the catering domain (in code)
+### Step 11: Declare the catering domain (the SSOT)
 
 - [ ] complete
 
-**Goal.** The catering domain's entities, relationships, and process names exist as SQLModel classes with rich descriptions, but processes are stubs. This step is the design step for the reference implementation; the design lives in the code, not in a separate document.
+**Goal.** The catering domain — entities, relationships, processes with their declared timing and resource requirements, and base capacities — exists as a single declarative module that is the *only* place catering simulation behaviour is defined. Bespoke Python is deferred to step 13 and limited to what cannot be declared.
 
 **Prerequisites.** Step 10.
 
-**Read first.** SCOPE.md "v1 capability bar" and "In scope for v1" (reference catering domain). DECISIONS.md D10, D21.
+**Read first.** SCOPE.md "v1 capability bar", "In scope for v1" (reference catering domain), "Success criteria" (the catering definition reads as the single source of truth). DECISIONS.md D10, D21.
 
 **Deliverables.**
 
-- `src/twindle/reference/catering/domain.py` defining catering entities as subclasses of the framework base types. At minimum: `Truck(Resource)`, `Employee(Resource)`, `Venue(Location)`, `CateringEvent(Event)`, `Shift(Schedule)`, `EventAssignment(Assignment)`, plus a `Booking(Entity)` or equivalent linking a customer to a catering event. Each class has a docstring describing its role and field-level descriptions on every column.
-- Relationships are declared with SQLModel `Relationship` where needed.
-- `src/twindle/reference/catering/processes.py` declaring (as stubs that raise `NotImplementedError`) the process names: `truck_travel`, `event_setup`, `event_service`, `event_teardown`, `truck_breakdown`. Each carries a docstring explaining its role.
-- `tests/reference/catering/test_domain.py` asserting: every catering entity inherits from the correct framework base; the schema builds without error; the generated tool surface (via step 8) includes a list/get/filter tool for every catering entity.
-- The whole `domain.py` file is under 500 lines (success criterion).
+- A `domain` module in the catering reference (under the reference layer) defining catering entities as subclasses of the framework base types. At minimum: `Truck(Resource)` with a base `capacity` (typically 1 — one job at a time per truck) and any domain-specific fields (e.g. `payload_kg`); `Employee(Resource)` with base `capacity` 1; `Venue(Location)`; `CateringEvent(Event)`; `Shift(Schedule)`; `EventAssignment(Assignment)`; `Booking(Entity)` (or equivalent linking a customer to a catering event). Each class has a docstring describing its role and field-level descriptions on every column. Relationships are declared with SQLModel `Relationship` where needed.
+- **Declared processes** as `Process` subclasses with their `duration: Duration` and `requires: list[ResourceRequirement]` set as class-level defaults:
+  - `TruckTravel(Process)` — duration sampled from a distribution (e.g. `Duration(mean=..., distribution="triangular", min=..., max=...)`) parameterised by the leg distance via a small helper; requires one `Truck`.
+  - `EventSetup(Process)` — duration distribution; requires one `Truck` (occupied) plus N `Employee`s.
+  - `EventService(Process)` — duration tied to the `CateringEvent` size; requires N `Employee`s.
+  - `EventTeardown(Process)` — duration distribution; requires N `Employee`s and (optionally) one `Truck`.
+- **Capacity windows.** `CapacityWindow` rows declared (or generated in the seed step) to express: shift coverage for employees (only on-shift employees count toward effective capacity at a given time), and any other time-varying capacity the catering business has. No bespoke shift-handling code: the runtime resolves effective capacity from `CapacityWindow` rows automatically.
+- **No bespoke process file in this step.** `truck_breakdown` is deferred to step 13 because it is a stochastic event injector and does not fit the declarative spec. No other catering process file is created here.
+- Tests under `tests/reference/catering/`:
+  - `test_domain.py`: every catering entity inherits from the correct framework base; the schema builds without error; the generated tool surface (step 8) includes a list/get/filter tool for every catering entity and `describe_process` returns non-empty timing/requirements for each declared process.
+  - `test_declarative_completeness.py`: assert that all four declared processes (`TruckTravel`, `EventSetup`, `EventService`, `EventTeardown`) carry a non-empty `duration` and `requires`, and that running the engine's declarative interpreter on a tiny seeded catering DB produces simulation events with no bespoke override registered.
 
-**Acceptance criteria.** Tests pass. `domain.py` line count is under 500. Every public class and field has a description.
+**Acceptance criteria.** Tests pass. The catering domain module is under 500 lines, including the declared processes and their timing/requirements (this is the SSOT — the line count covers it). Every public class and field has a description. The declarative interpreter alone runs catering processes against a seeded DB.
 
-**On success.** Commit `step 11: design catering domain`.
+**On success.** Commit `step 11: declare catering domain`.
 
-**On failure.** If `domain.py` exceeds 500 lines, simplify before moving on; the success criterion is non-negotiable.
+**On failure.** If the module exceeds 500 lines, simplify before moving on; the success criterion is non-negotiable. If a process cannot be expressed declaratively, first try to extend the value objects in step 2 rather than introducing bespoke code here.
 
 ---
 
@@ -428,26 +371,26 @@ twindle/
 
 ---
 
-### Step 13: Catering simulation processes
+### Step 13: Catering bespoke logic and demo scenarios
 
 - [ ] complete
 
-**Goal.** The catering process stubs from step 11 are implemented as SimPy processes against the framework runtime, producing a non-trivial simulation.
+**Goal.** Implement the *only* parts of the catering simulation that cannot be expressed declaratively in step 11 (currently: stochastic truck breakdowns), and the demo what-if scenarios that exercise the agent layer.
 
 **Prerequisites.** Step 12.
 
-**Read first.** SCOPE.md "v1 capability bar" and the catering paragraph of "In scope for v1". DECISIONS.md D9, D16, D23.
+**Read first.** SCOPE.md "v1 capability bar" and the catering paragraph of "In scope for v1". DECISIONS.md D9, D16, D23. Step 6 (bespoke escape hatch) and step 11 (declared processes).
 
 **Deliverables.**
 
-- `src/twindle/reference/catering/processes.py` implementing: `truck_travel` (depart-arrive with travel time as a function of distance and a stochastic delay), `event_setup`, `event_service`, `event_teardown` (each consuming time and requiring assigned employees), `truck_breakdown` (a stochastic event that takes a truck out of service for a duration).
-- Process registration with the framework runtime so `run_simulation(catering_domain, ...)` picks them up automatically.
-- A small set of demo what-if scenarios in `src/twindle/reference/catering/scenarios.py`: at minimum "add two more trucks during summer weekends", "increase event duration by 20%", "remove one truck for a week".
-- `tests/reference/catering/test_simulation.py` asserting: a baseline simulation over one week of seeded data completes; events get on-time arrival rates derived from the trace; running a "add two trucks" scenario produces a measurably different on-time rate from baseline.
+- A small bespoke module in the catering reference implementing `truck_breakdown` as a registered override (per the bespoke escape hatch in step 6): a stochastic event injector that periodically samples a breakdown event, removes the affected truck from the available pool for a sampled repair duration via the engine's capacity-window mechanism, and re-adds it. No other catering process is implemented here — `TruckTravel`, `EventSetup`, `EventService`, `EventTeardown` continue to run through the engine's declarative interpreter using their step-11 declarations.
+- The bespoke module is short: target under 100 lines including imports and docstrings. If it grows beyond that, audit whether parts can be lifted into the declarative spec.
+- A demo scenarios module in the catering reference exporting at minimum: "add two more trucks during summer weekends" (uses `AddEntity` + `CapacityWindow`), "increase event duration by 20%" (`ScaleParameter` on `Duration.mean`), "remove one truck for a week" (`CapacityWindow` reducing fleet capacity).
+- Tests under `tests/reference/catering/test_simulation.py` asserting: a baseline simulation over one week of seeded data completes; on-time arrival rates can be derived from the trace; the "add two trucks" scenario produces a measurably different on-time rate from baseline; the breakdown injector actually removes and restores truck capacity (verified by inspecting `CapacityWindow` rows or trace events).
 
-**Acceptance criteria.** Tests pass. Baseline simulation over a week completes in under 30 seconds. The "add two trucks" scenario changes on-time rate by at least one percentage point.
+**Acceptance criteria.** Tests pass. Baseline simulation over a week completes in under 30 seconds. The "add two trucks" scenario changes on-time rate by at least one percentage point. Bespoke catering code is under 100 lines.
 
-**On success.** Commit `step 13: catering simulation processes`.
+**On success.** Commit `step 13: catering bespoke logic and demo scenarios`.
 
 ---
 

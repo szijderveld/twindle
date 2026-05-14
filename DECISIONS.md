@@ -230,3 +230,20 @@ The agent is restricted to composing `Scenario` objects from these. Domains may 
 **Decision.** The frontend uses pnpm. The lockfile is `pnpm-lock.yaml`.
 
 **Rationale.** pnpm has the strictest dependency resolution of the three mainstream Node package managers, the smallest disk footprint via its content-addressable store, and is the default in the CopilotKit Pydantic AI starter. Picking it here locks in compatibility with the example code we will inevitably crib from.
+
+---
+
+## D27. Domain declares; engine interprets
+
+**Decision.** Everything the discrete event simulation needs about a domain — process timing, resource requirements, base resource capacity, and capacity changes over time — is declared on the domain itself, using a fixed set of value objects in the domain layer:
+
+- `Duration` on every `Process` subclass (mean + distribution + optional bounds/std).
+- `ResourceRequirement` entries in `Process.requires` (resource type, quantity, occupy-vs-consume mode).
+- `Resource.capacity` for the base pool size of each resource class.
+- `CapacityWindow` rows that override a resource's effective capacity within a time range.
+
+The simulation runtime is a generic interpreter over these declarations. Given a domain that uses only the declarative facilities, the runtime builds the SimPy resource pool, schedules capacity-window transitions, and generates a SimPy process function per `Process` instance with zero domain-specific code. Bespoke per-domain Python is an explicit escape hatch — a `@bespoke_process(ProcessClass)` registration — used only for behaviour that genuinely cannot be expressed declaratively (e.g. stochastic event injectors, processes that branch on simulation state).
+
+**Rationale.** The single-source-of-truth claim in SCOPE.md is only true if the domain module is also the source of truth for the *simulation*, not just the schema and the query surface. Pushing timing, requirements, and capacity into per-domain SimPy code would make the reference catering domain readable but a second domain — and the agent's ability to introspect timing and capacity — would require rewriting simulation code each time. Declarative-first keeps the catering reference under 500 lines including its full simulation behaviour, lets the agent answer "what's the effective capacity of trucks next weekend?" through generated introspection tools rather than `run_sql`, and gives a clear, narrow contract a second reference domain (v1.1) must satisfy.
+
+**Consequence for the bespoke escape hatch.** Bespoke modules in a reference domain stay short by design (catering targets <100 lines for `truck_breakdown`). If a bespoke module grows large, the right fix is to lift the missing concept into the domain layer's value objects rather than accreting per-domain SimPy code.
