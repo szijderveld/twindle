@@ -8,3 +8,11 @@ wheels/
 
 # Virtual environments
 .venv
+
+
+#dont commit
+.claude/commands/next-step.md
+SCOPE.md
+PLAN.md
+DECISIONS.md
+
